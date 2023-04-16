@@ -9,14 +9,14 @@ from typing import Iterable, Tuple, TypeVar
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup, Tag
 
-TMP_ARTICLE_PIC_PATH = Path("/tmp/shielded-cute-animal-pics")
-
+TMP_ARTICLE_PIC_PATH = Path(tempfile.gettempdir()) / "/shielded-cute-animal-pics"
+ARTICLE_NAME = "List_of_animal_names"
 # Index of Terms_by_species_or_taxon section.
 # It's hardcoded because while Wikimedia's API does allow finding a section's
 # ID by its title, it doesn't work in this particular page (I guess its TOC is
 # irregular?). So this is the next best thing, and at least it won't break on
 # title change ;)
-SECTION_INDEX = "2"
+SECTION_INDEX = 2
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -34,9 +34,12 @@ class Ref:
 
 async def main():
     async with ClientSession() as session:
-        section = BeautifulSoup(await fetch_section_html(session), "html.parser")
+        section_raw = await fetch_section_html(ARTICLE_NAME, SECTION_INDEX, session)
+        section = BeautifulSoup(section_raw, "html.parser")
         animal_to_cas_index = resolve_refs(dict(parse_species_table(section)))
         ca_to_animals_index = invert(animal_to_cas_index)
+
+        ## thumbnail fetching
         animals = animal_to_cas_index.keys()
         tn_links = await fetch_thumbnails_links(animals, session)
         futures = [dl_file(url, animal_name, session) for (animal_name, url) in tn_links.items()]
@@ -142,8 +145,12 @@ def parse_species_table(table: Tag) -> Iterable[Tuple[str, list[str] | Ref]]:
         yield animal_name, adjs
 
 
-async def fetch_section_html(session: ClientSession) -> str:
-    req = session.get(
+async def fetch_section_html(article: str, section_index: int, sess: ClientSession) -> str:
+    """
+    Fetches only the specified section out of the article.
+    Returns its content as HTML.
+    """
+    req = sess.get(
         "https://en.wikipedia.org/w/api.php",
         headers={"Accept-Encoding": "gzip"},
         params={
@@ -152,7 +159,7 @@ async def fetch_section_html(session: ClientSession) -> str:
             "prop": "text",
             "format": "json",
             "formatversion": "2",
-            "section": SECTION_INDEX,
+            "section": str(section_index),
         },
     )
     async with req as resp:
@@ -160,11 +167,16 @@ async def fetch_section_html(session: ClientSession) -> str:
 
 
 async def fetch_thumbnails_links(titles: list[str], sess: ClientSession) -> dict[str, str]:
+    """
+    Bulk fetch thumbnails of all of articles corresponding to titles.
+
+    Returns a dictionary mapping animal names to URL of their article's leading picture.
+    """
     req = sess.get(
         "https://en.wikipedia.org/w/api.php",
         headers={"Accept-Encoding": "gzip"},
         params={
-            "titles": "Ox|Newt",
+            "titles": "|".join(titles),
             "action": "query",
             "prop": "pageimages|pageterms",
             "piprop": "thumbnail",
@@ -180,8 +192,12 @@ async def fetch_thumbnails_links(titles: list[str], sess: ClientSession) -> dict
 
 
 async def dl_file(link: str, animal_name: str, sess: ClientSession) -> Path:
+    """
+    Asynchronously downloads content at link into a file named animal_name
+    under the project's temporary dir. Returns a Path to the downloaded file.
+    """
     # assuming ext is jpg because I'm tired
-    target = Path(f"{tempfile.gettempdir()}/{animal_name}.jpg")
+    target = TMP_ARTICLE_PIC_PATH / f"{animal_name}.jpg"
     async with sess.get(link) as resp:
         with target.open("wb") as f:
             f.write(await resp.read())
