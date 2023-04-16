@@ -1,15 +1,19 @@
 import asyncio
 import copy
+import itertools
+import logging
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from pprint import pformat
+from string import Template
 from typing import Iterable, Tuple, TypeVar
 
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup, Tag
 
-TMP_ARTICLE_PIC_PATH = Path(tempfile.gettempdir()) / "/shielded-cute-animal-pics"
+WIKIMEDIA_BATCH_CAP = 49
+TMP_ARTICLE_PIC_PATH = Path("shielded-cute-animal-pics")
 ARTICLE_NAME = "List_of_animal_names"
 # Index of Terms_by_species_or_taxon section.
 # It's hardcoded because while Wikimedia's API does allow finding a section's
@@ -37,14 +41,25 @@ async def main():
         section_raw = await fetch_section_html(ARTICLE_NAME, SECTION_INDEX, session)
         section = BeautifulSoup(section_raw, "html.parser")
         animal_to_cas_index = resolve_refs(dict(parse_species_table(section)))
-        ca_to_animals_index = invert(animal_to_cas_index)
 
         ## thumbnail fetching
         animals = animal_to_cas_index.keys()
-        tn_links = await fetch_thumbnails_links(animals, session)
-        futures = [dl_file(url, animal_name, session) for (animal_name, url) in tn_links.items()]
-        paths = await asyncio.gather(*futures)
-        print(paths)
+        links_futures = [
+            fetch_thumbnails_links(batch, session)
+            for batch in batched(animals, WIKIMEDIA_BATCH_CAP)
+        ]
+        links = join_dicts(await asyncio.gather(*links_futures))
+        logging.info(pformat(links))
+        pics_futures = [
+            dl_file(url, animal_name, session) for (animal_name, url) in links.items() if url
+        ]
+        pic_index = dict(await asyncio.gather(*pics_futures))
+        logging.info(pformat(pic_index))
+
+        ## html output
+        ca_to_animals_index = invert(animal_to_cas_index)
+        logging.info(pformat(ca_to_animals_index))
+        make_html_result(ca_to_animals_index, pic_index)
 
 
 def invert(index: dict[T, list[U]]) -> dict[U, list[T]]:
@@ -180,30 +195,85 @@ async def fetch_thumbnails_links(titles: list[str], sess: ClientSession) -> dict
             "action": "query",
             "prop": "pageimages|pageterms",
             "piprop": "thumbnail",
-            "pithumbsize": "600",
+            "pithumbsize": "200",
             "format": "json",
             "formatversion": "2",
         },
     )
 
     async with req as resp:
-        pages = (await resp.json())["query"]["pages"]
-        return {page["title"]: page["thumbnail"]["source"] for page in pages}
+        resp_json = await resp.json()
+        logging.info(pformat(resp_json))
+        pages = resp_json["query"]["pages"]
+        return {
+            page["title"]: (page["thumbnail"]["source"] if "thumbnail" in page else None)
+            for page in pages
+        }
 
 
-async def dl_file(link: str, animal_name: str, sess: ClientSession) -> Path:
+async def dl_file(link: str, animal_name: str, sess: ClientSession) -> tuple[str, Path]:
     """
     Asynchronously downloads content at link into a file named animal_name
-    under the project's temporary dir. Returns a Path to the downloaded file.
+    under the project's temporary dir.
+
+    Returns a Path to the downloaded file, and the animal name so we won't get
+    lost in the sauce.
     """
     # assuming ext is jpg because I'm tired
     target = TMP_ARTICLE_PIC_PATH / f"{animal_name}.jpg"
     async with sess.get(link) as resp:
         with target.open("wb") as f:
             f.write(await resp.read())
-    return target
+    return animal_name, target
+
+
+def make_html_result(ca_animals_index: dict[str, list[str]], pic_index: dict[str, Path]) -> Path:
+    with open("./template.html") as f:
+        template = Template(f.read())
+
+    rows = []
+    for ca, animals in ca_animals_index.items():
+        pic = pic_index.get(animals[0])
+        row = f"""
+        <tr>
+          <td>{ca}</td>
+          <td>{', '.join(animals)}</td>
+          <td><img src="{pic.absolute() if pic else ''}"></img></td>
+        </tr>
+        """
+        rows.append(row)
+
+    out = Path("./out.html")
+    with out.open("w") as f:
+        f.write(template.substitute(tbody="".join(rows)))
+    return out
+
+
+def batched(iterable, n):
+    """
+    Batch data into tuples of length n. The last batch may be shorter.
+    >>> list(batched('ABCDEFG', 3))
+    [('A', 'B', 'C'), ('D', 'E', 'F'), ('G',)]
+    """
+    if n < 1:
+        raise ValueError("n must be at least one")
+    it = iter(iterable)
+    while batch := tuple(itertools.islice(it, n)):
+        yield batch
+
+
+def join_dicts(dicts: list[dict]) -> dict:
+    """
+    >>> join_dicts([{"a": 1}, {"b": 2}])
+    {'a': 1, 'b': 2}
+    """
+    result = {}
+    for d in dicts:
+        result.update(d)
+    return result
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     TMP_ARTICLE_PIC_PATH.mkdir(exist_ok=True)
     asyncio.run(main())
