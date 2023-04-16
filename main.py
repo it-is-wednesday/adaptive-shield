@@ -1,10 +1,15 @@
+import asyncio
 import copy
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from pprint import pprint
 from typing import Iterable, Tuple, TypeVar
 
-import requests
+import aiohttp
 from bs4 import BeautifulSoup, Tag
+
+TMP_ARTICLE_PIC_PATH = Path("/tmp/shielded-cute-animal-pics")
 
 # Index of Terms_by_species_or_taxon section.
 # It's hardcoded because while Wikimedia's API does allow finding a section's
@@ -27,10 +32,12 @@ class Ref:
     referral: str
 
 
-def main():
-    section = BeautifulSoup(fetch_section_html())
+async def main():
+    async with aiohttp.ClientSession() as session:
+        section = BeautifulSoup(await fetch_section_html(session))
+
     animal_to_ca_index = resolve_refs(dict(parse_species_table(section)))
-    print(invert(animal_to_ca_index))
+    pprint(invert(animal_to_ca_index))
 
 
 def invert(index: dict[T, list[U]]) -> dict[U, list[T]]:
@@ -133,8 +140,8 @@ def parse_species_table(table: Tag) -> Iterable[Tuple[str, list[str] | Ref]]:
         yield animal_name, adjs
 
 
-def fetch_section_html() -> str:
-    resp = requests.get(
+async def fetch_section_html(session: aiohttp.ClientSession) -> str:
+    get = session.get(
         "https://en.wikipedia.org/w/api.php",
         headers={"Accept-Encoding": "gzip"},
         params={
@@ -146,8 +153,10 @@ def fetch_section_html() -> str:
             "section": SECTION_INDEX,
         },
     )
-    return resp.json()["parse"]["text"]
+    async with get as resp:
+        return (await resp.json())["parse"]["text"]
 
 
 if __name__ == "__main__":
-    main()
+    TMP_ARTICLE_PIC_PATH.mkdir(exist_ok=True)
+    asyncio.run(main())
