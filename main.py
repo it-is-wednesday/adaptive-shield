@@ -1,7 +1,7 @@
 import copy
 import re
 from dataclasses import dataclass
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, TypeVar
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -12,6 +12,9 @@ from bs4 import BeautifulSoup, Tag
 # irregular?). So this is the next best thing, and at least it won't break on
 # title change ;)
 SECTION_INDEX = "2"
+
+T = TypeVar("T")
+U = TypeVar("U")
 
 
 @dataclass
@@ -30,13 +33,19 @@ def main():
     print(invert(animal_to_ca_index))
 
 
-def invert(animal_to_ca: dict[str, list[str]]) -> dict[str, list[str]]:
-    "Transform an index of animal->CAs to an index of CA->animals"
+def invert(index: dict[T, list[U]]) -> dict[U, list[T]]:
+    """
+    Transform an index of x->ys to an index of y->xs.
 
-    result: dict[str, list[str]] = {}
-    for animal_name, cas in animal_to_ca.items():
-        for ca in cas:
-            result.setdefault(ca, []).append(animal_name)
+    >>> d = {"a": [1, 2], "b": [1, 3, 4]}
+    >>> invert(d)
+    {1: ['a', 'b'], 2: ['a'], 3: ['b'], 4: ['b']}
+    """
+
+    result: dict[U, list[T]] = {}
+    for t, us in index.items():
+        for u in us:
+            result.setdefault(u, []).append(t)
     return result
 
 
