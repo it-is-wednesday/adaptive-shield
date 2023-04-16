@@ -52,7 +52,11 @@ def invert(index: dict[T, list[U]]) -> dict[U, list[T]]:
 def resolve_refs(has_unresolved: dict[str, list[str] | Ref]) -> dict[str, list[str]]:
     """
     Returns a copy of has_unresolved where every Ref value is replaced with a
-    pointer to the CA list in its referral
+    pointer to the CA list in its referral.
+
+    >>> d = {"a": ["hello"], "b": Ref("a")}
+    >>> resolve_refs(d)
+    {'a': ['hello'], 'b': ['hello']}
     """
     cas = copy.deepcopy(has_unresolved)
     only_refs = filter(lambda x: isinstance(x[1], Ref), dict(cas).items())
