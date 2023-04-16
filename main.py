@@ -1,12 +1,12 @@
 import asyncio
 import copy
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from pprint import pprint
 from typing import Iterable, Tuple, TypeVar
 
-import aiohttp
+from aiohttp import ClientSession
 from bs4 import BeautifulSoup, Tag
 
 TMP_ARTICLE_PIC_PATH = Path("/tmp/shielded-cute-animal-pics")
@@ -33,11 +33,15 @@ class Ref:
 
 
 async def main():
-    async with aiohttp.ClientSession() as session:
-        section = BeautifulSoup(await fetch_section_html(session))
-
-    animal_to_ca_index = resolve_refs(dict(parse_species_table(section)))
-    pprint(invert(animal_to_ca_index))
+    async with ClientSession() as session:
+        section = BeautifulSoup(await fetch_section_html(session), "html.parser")
+        animal_to_cas_index = resolve_refs(dict(parse_species_table(section)))
+        ca_to_animals_index = invert(animal_to_cas_index)
+        animals = animal_to_cas_index.keys()
+        tn_links = await fetch_thumbnails_links(animals, session)
+        futures = [dl_file(url, animal_name, session) for (animal_name, url) in tn_links.items()]
+        paths = await asyncio.gather(*futures)
+        print(paths)
 
 
 def invert(index: dict[T, list[U]]) -> dict[U, list[T]]:
@@ -133,15 +137,13 @@ def parse_species_table(table: Tag) -> Iterable[Tuple[str, list[str] | Ref]]:
 
         # discard anything between parentheses. usually pointless but maybe I
         # just didn't understand the assignment
-        adjs = [
-            re.sub("\s+\\(.*\\)", "", adj) for adj in collat_adj_tag.stripped_strings
-        ]
+        adjs = [re.sub("\s+\\(.*\\)", "", adj) for adj in collat_adj_tag.stripped_strings]
 
         yield animal_name, adjs
 
 
-async def fetch_section_html(session: aiohttp.ClientSession) -> str:
-    get = session.get(
+async def fetch_section_html(session: ClientSession) -> str:
+    req = session.get(
         "https://en.wikipedia.org/w/api.php",
         headers={"Accept-Encoding": "gzip"},
         params={
@@ -153,8 +155,37 @@ async def fetch_section_html(session: aiohttp.ClientSession) -> str:
             "section": SECTION_INDEX,
         },
     )
-    async with get as resp:
+    async with req as resp:
         return (await resp.json())["parse"]["text"]
+
+
+async def fetch_thumbnails_links(titles: list[str], sess: ClientSession) -> dict[str, str]:
+    req = sess.get(
+        "https://en.wikipedia.org/w/api.php",
+        headers={"Accept-Encoding": "gzip"},
+        params={
+            "titles": "Ox|Newt",
+            "action": "query",
+            "prop": "pageimages|pageterms",
+            "piprop": "thumbnail",
+            "pithumbsize": "600",
+            "format": "json",
+            "formatversion": "2",
+        },
+    )
+
+    async with req as resp:
+        pages = (await resp.json())["query"]["pages"]
+        return {page["title"]: page["thumbnail"]["source"] for page in pages}
+
+
+async def dl_file(link: str, animal_name: str, sess: ClientSession) -> Path:
+    # assuming ext is jpg because I'm tired
+    target = Path(f"{tempfile.gettempdir()}/{animal_name}.jpg")
+    async with sess.get(link) as resp:
+        with target.open("wb") as f:
+            f.write(await resp.read())
+    return target
 
 
 if __name__ == "__main__":
